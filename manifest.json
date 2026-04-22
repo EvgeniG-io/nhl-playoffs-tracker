@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "NHL Playoff Tracker",
+  "version": "1.0.0",
+  "description": "Track NHL playoff teams and each club's next game from official NHL data.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "NHL Playoff Tracker"
+  },
+  "host_permissions": ["https://api-web.nhle.com/*"]
+}

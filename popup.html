@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NHL Playoff Tracker</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="header">
+        <h1 class="title">NHL Playoff Tracker</h1>
+        <p class="subtitle">Playoff picture and next game</p>
+      </header>
+
+      <section class="controls">
+        <label class="field-label" for="team-select">Playoff team</label>
+        <select id="team-select" class="team-select" disabled>
+          <option value="">Loading teams…</option>
+        </select>
+
+        <label class="field-label field-label--spaced" for="view-mode">View</label>
+        <select id="view-mode" class="team-select" disabled>
+          <option value="next">Next upcoming game</option>
+          <option value="last">Last result &amp; highlights</option>
+        </select>
+      </section>
+
+      <div id="loading" class="loading" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="loading-text">Loading playoff teams…</span>
+      </div>
+
+      <div id="error" class="message message--error hidden" role="alert"></div>
+
+      <section id="results" class="results hidden" aria-live="polite"></section>
+    </main>
+    <script src="popup.js" defer></script>
+  </body>
+</html>
