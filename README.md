@@ -71,9 +71,11 @@ Your policy will be available at:
 
 `https://<your-username>.github.io/<repository-name>/privacy/`
 
-Example (replace with your account and exact repo slug):
+Example (must match your **exact** GitHub repo name; this project is **`nhl-playoffs-tracker`**):
 
-`https://evgenig-io.github.io/nhl-playoff-tracker/privacy/`
+`https://evgenig-io.github.io/nhl-playoffs-tracker/privacy/`
+
+The **site root** (`…github.io/nhl-playoffs-tracker/`) only works after you add a root `index.html` (this repo includes one that links to the policy). If you still see 404 at root, wait a few minutes after the first Pages build, hard-refresh, or confirm Pages source is **`main`** and **`/ (root)`**.
 
 Use that URL in the Chrome Web Store **Privacy policy** field. A **`.nojekyll`** file is included at the repo root so GitHub Pages serves the static HTML as-is.
 

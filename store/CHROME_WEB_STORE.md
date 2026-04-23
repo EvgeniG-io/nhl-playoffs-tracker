@@ -32,7 +32,7 @@ python3 build_assets.py
 - **Privacy policy URL**: required when the questionnaire indicates you handle user data or certain APIs; many read-only extensions still host a short policy page (GitHub Pages, etc.).
   - This repo includes **`privacy/index.html`**. Enable **GitHub Pages** on the repo (**Settings → Pages → Deploy from a branch → `/ (root)`** on `main`), then use  
     `https://<your-username>.github.io/<repository-name>/privacy/`  
-    in the Store (example: `https://evgenig-io.github.io/nhl-playoff-tracker/privacy/`). See the root **README** for the full steps.
+    in the Store (example: `https://evgenig-io.github.io/nhl-playoffs-tracker/privacy/` — note **`playoffs`** in the repo slug). See the root **README** for the full steps.
 - **Branding**: if you show NHL or team marks in screenshots, follow [Chrome Web Store branding](https://developer.chrome.com/docs/webstore/branding) and league/trademark rules.
 
 ## Before you publish
