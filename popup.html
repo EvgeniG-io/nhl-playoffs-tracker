@@ -8,32 +8,79 @@
   </head>
   <body>
     <main class="popup">
-      <header class="header">
-        <h1 class="title">NHL Playoff Tracker</h1>
-        <p class="subtitle">Playoff picture and next game</p>
+      <header class="app-header">
+        <div class="app-header__brand">
+          <span class="app-header__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M4 18c2-6 6-10 12-12l1 2c-4 2-7 5-9 9l-1-1c-1 2-2 4-3 6H4z"
+                fill="currentColor"
+                opacity="0.9"
+              />
+              <circle cx="17" cy="7" r="2.2" fill="currentColor" />
+            </svg>
+          </span>
+          <h1 class="app-header__title">NHL Playoff Tracker</h1>
+        </div>
+        <div class="app-header__deco" aria-hidden="true">
+          <span class="app-header__dot">—</span>
+          <span class="app-header__dot">×</span>
+        </div>
       </header>
 
-      <section class="controls">
-        <label class="field-label" for="team-select">Playoff team</label>
-        <select id="team-select" class="team-select" disabled>
-          <option value="">Loading teams…</option>
-        </select>
+      <section class="toolbar">
+        <div class="field">
+          <label class="field__label" for="team-select">Select team</label>
+          <div class="select-row">
+            <div id="team-preview" class="team-preview hidden" aria-hidden="true"></div>
+            <select id="team-select" class="select select--team" disabled>
+              <option value="">Loading teams…</option>
+            </select>
+          </div>
+        </div>
 
-        <label class="field-label field-label--spaced" for="view-mode">View</label>
-        <select id="view-mode" class="team-select" disabled>
-          <option value="next">Next upcoming game</option>
-          <option value="last">Last result &amp; highlights</option>
-        </select>
+        <div class="field">
+          <span class="field__label" id="view-tabs-label">View</span>
+          <div class="segmented" role="tablist" aria-labelledby="view-tabs-label">
+            <button type="button" class="segmented__tab is-active" role="tab" data-panel-tab="next" aria-selected="true">
+              Next game
+            </button>
+            <button type="button" class="segmented__tab" role="tab" data-panel-tab="series" aria-selected="false">
+              Series overview
+            </button>
+            <button type="button" class="segmented__tab" role="tab" data-panel-tab="standings" aria-selected="false">
+              Standings
+            </button>
+          </div>
+        </div>
       </section>
 
       <div id="loading" class="loading" role="status" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
-        <span class="loading-text">Loading playoff teams…</span>
+        <span class="loading-text">Loading…</span>
       </div>
 
       <div id="error" class="message message--error hidden" role="alert"></div>
 
-      <section id="results" class="results hidden" aria-live="polite"></section>
+      <section id="panel" class="panel hidden" aria-live="polite"></section>
+
+      <footer class="app-footer">
+        <button type="button" class="footer-link" id="btn-settings">
+          <span class="footer-link__icon" aria-hidden="true">⚙</span>
+          Settings
+        </button>
+        <div class="footer-center">
+          <button type="button" class="footer-link" id="btn-refresh">
+            <span class="footer-link__icon" aria-hidden="true">↻</span>
+            Refresh
+          </button>
+          <div id="updated-at" class="footer-meta"></div>
+        </div>
+        <button type="button" class="footer-link" id="btn-help">
+          <span class="footer-link__icon" aria-hidden="true">?</span>
+          Help
+        </button>
+      </footer>
     </main>
     <script src="popup.js" defer></script>
   </body>

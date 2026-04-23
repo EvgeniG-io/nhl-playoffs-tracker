@@ -37,6 +37,10 @@ When you open the popup:
 - Empty states when there is no upcoming game or no completed game in the current season payload.
 - Modern popup styling with light/dark-friendly colors.
 
+## Chrome Web Store assets
+
+Listing images, promo tiles, and a publishing checklist live in **`store/`**. Start with **`store/CHROME_WEB_STORE.md`**.
+
 ## Install (development)
 
 1. Clone this repo.
@@ -44,7 +48,7 @@ When you open the popup:
 
 ## Permissions
 
-Only **`https://api-web.nhle.com/*`** is declared for network access so the extension can call the NHL API from the popup.
+Host permissions are limited to **`/v1/standings/*`**, **`/v1/club-schedule-season/*`**, and **`/v1/scoreboard/*`** on **`api-web.nhle.com`** (see `manifest.json`).
 
 Opening recap or GameCenter uses normal browser navigation to **`nhl.com`** (no extra host permission required for typical `<a href>` navigation).
 
@@ -54,3 +58,27 @@ Opening recap or GameCenter uses normal browser navigation to **`nhl.com`** (no 
 - **Highlight pages** load on **NHL’s website** when you choose a link.
 
 The extension does not collect or store analytics in this codebase; it performs fetches when you open or refresh the popup and when you change team or view.
+
+### Host the privacy policy on GitHub Pages (Store URL)
+
+A short, public **privacy policy** page ships in this repo as **`privacy/index.html`**. After you push to GitHub:
+
+1. Open the repo on GitHub → **Settings** → **Pages**.
+2. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
+3. Choose your default branch (usually **`main`**) and folder **`/ (root)`**, then save.
+
+Your policy will be available at:
+
+`https://<your-username>.github.io/<repository-name>/privacy/`
+
+Example (replace with your account and exact repo slug):
+
+`https://evgenig-io.github.io/nhl-playoff-tracker/privacy/`
+
+Use that URL in the Chrome Web Store **Privacy policy** field. A **`.nojekyll`** file is included at the repo root so GitHub Pages serves the static HTML as-is.
+
+Edit **`privacy/index.html`** if your behavior or APIs change.
+
+## Icon (Chrome toolbar & Web Store)
+
+PNG assets live in **`icons/`** (`icon16.png`, `icon48.png`, `icon128.png`). They are **original artwork** in an **NHL-inspired** navy / silver / ice palette with generic hockey/playoff motifs. They are **not** the official NHL logo or team marks, which are **trademarks**; for publishing, use this set or your own licensed graphics.

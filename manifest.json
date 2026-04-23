@@ -3,9 +3,23 @@
   "name": "NHL Playoff Tracker",
   "version": "1.0.0",
   "description": "Track NHL playoff teams and each club's next game from official NHL data.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "NHL Playoff Tracker"
+    "default_title": "NHL Playoff Tracker",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
-  "host_permissions": ["https://api-web.nhle.com/*"]
+  "host_permissions": [
+    "https://api-web.nhle.com/v1/standings/*",
+    "https://api-web.nhle.com/v1/club-schedule-season/*",
+    "https://api-web.nhle.com/v1/scoreboard/*"
+  ]
 }

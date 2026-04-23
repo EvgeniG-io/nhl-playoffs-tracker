@@ -1,7 +1,14 @@
 const API_BASE = "https://api-web.nhle.com/v1";
 const NHL_WEB = "https://www.nhl.com";
 
-/** @returns {string} Local calendar date YYYY-MM-DD */
+/** @type {{ date: string, rows: any[] }} */
+let cachedStandings = { date: "", rows: [] };
+/** @type {{ abbrev: string, name: string, logo?: string }[]} */
+let teamsCatalog = [];
+/** @type {{ abbrev: string, games: any[] } | null} */
+let scheduleCache = null;
+let lastRefreshMs = 0;
+
 function getTodayDate(date = new Date()) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -9,10 +16,6 @@ function getTodayDate(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-/**
- * NHL season id used by api-web (e.g. 20252026).
- * Regular season spans roughly Oct–Jun; preseason in Sep uses the upcoming season id.
- */
 function getSeason(date = new Date()) {
   const year = date.getFullYear();
   const month = date.getMonth();
@@ -40,10 +43,6 @@ async function fetchJson(url) {
   return res.json();
 }
 
-/**
- * Standings for a single date can be empty during parts of the playoffs/off-season.
- * Walk backward a few weeks to find the latest snapshot with 32 teams.
- */
 async function fetchStandingsWithFallback(maxBackDays = 45) {
   let probe = getTodayDate();
   for (let i = 0; i <= maxBackDays; i += 1) {
@@ -82,9 +81,6 @@ function hasExplicitPlayoffFlag(row) {
   return candidates.some((v) => v === true || v === 1 || v === "Y" || v === "y");
 }
 
-/**
- * Prefer explicit playoff flags when present; otherwise top 8 per conference by `conferenceSequence`.
- */
 function pickPlayoffTeams(rows) {
   if (!rows.length) return [];
 
@@ -127,24 +123,6 @@ function sortTeamsForUi(rows) {
     .sort((a, b) => teamDisplayName(a).localeCompare(teamDisplayName(b), undefined, { sensitivity: "base" }));
 }
 
-/** @returns {Promise<{ asOfDate: string, teams: { abbrev: string, name: string, logo?: string }[] }>} */
-async function fetchPlayoffTeams() {
-  const { date, rows } = await fetchStandingsWithFallback();
-  const playoffRows = pickPlayoffTeams(rows);
-
-  if (!playoffRows.length) {
-    throw new Error("Could not determine playoff teams from standings.");
-  }
-
-  const teams = sortTeamsForUi(playoffRows).map((row) => ({
-    abbrev: teamAbbrevFromRow(row),
-    name: teamDisplayName(row),
-    logo: typeof row.teamLogo === "string" ? row.teamLogo : undefined,
-  }));
-
-  return { asOfDate: date, teams };
-}
-
 function isCancelledGame(game) {
   const state = game?.gameScheduleState;
   return state === "CNCL" || state === "PPD";
@@ -160,7 +138,6 @@ function parseUtc(iso) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** @param {string} teamAbbrev */
 async function fetchTeamSchedule(teamAbbrev) {
   const season = getSeason();
   const url = `${API_BASE}/club-schedule-season/${encodeURIComponent(teamAbbrev)}/${season}`;
@@ -169,10 +146,6 @@ async function fetchTeamSchedule(teamAbbrev) {
   return { season, games };
 }
 
-/**
- * @param {any[]} games
- * @param {string} teamAbbrev
- */
 function findNextGame(games, teamAbbrev) {
   const now = Date.now();
   const upper = teamAbbrev.toUpperCase();
@@ -194,10 +167,26 @@ function findNextGame(games, teamAbbrev) {
   return candidates[0] ?? null;
 }
 
-/**
- * @param {any[]} games
- * @param {string} teamAbbrev
- */
+function findNextPlayoffGame(games, teamAbbrev) {
+  const now = Date.now();
+  const upper = teamAbbrev.toUpperCase();
+  const candidates = games.filter((g) => {
+    if (!g || isCancelledGame(g)) return false;
+    if (g.gameType !== 3) return false;
+    const away = g.awayTeam?.abbrev;
+    const home = g.homeTeam?.abbrev;
+    if (!away || !home) return false;
+    if (away.toUpperCase() !== upper && home.toUpperCase() !== upper) return false;
+    const t = parseUtc(g.startTimeUTC);
+    if (t == null) return false;
+    if (t <= now) return false;
+    if (isCompletedState(g.gameState)) return false;
+    return true;
+  });
+  candidates.sort((a, b) => parseUtc(a.startTimeUTC) - parseUtc(b.startTimeUTC));
+  return candidates[0] ?? null;
+}
+
 function findLastCompletedGame(games, teamAbbrev) {
   const now = Date.now();
   const upper = teamAbbrev.toUpperCase();
@@ -218,7 +207,25 @@ function findLastCompletedGame(games, teamAbbrev) {
   return candidates[0] ?? null;
 }
 
-/** @param {string} [pathOrUrl] */
+function findLatestCompletedPlayoffGame(games, teamAbbrev) {
+  const now = Date.now();
+  const upper = teamAbbrev.toUpperCase();
+  const candidates = games.filter((g) => {
+    if (!g || isCancelledGame(g)) return false;
+    if (g.gameType !== 3) return false;
+    const away = g.awayTeam?.abbrev;
+    const home = g.homeTeam?.abbrev;
+    if (!away || !home) return false;
+    if (away.toUpperCase() !== upper && home.toUpperCase() !== upper) return false;
+    if (!isCompletedState(g.gameState)) return false;
+    const t = parseUtc(g.startTimeUTC);
+    if (t != null && t > now) return false;
+    return true;
+  });
+  candidates.sort((a, b) => (parseUtc(b.startTimeUTC) ?? 0) - (parseUtc(a.startTimeUTC) ?? 0));
+  return candidates[0] ?? null;
+}
+
 function toNhlAbsoluteUrl(pathOrUrl) {
   if (!pathOrUrl || typeof pathOrUrl !== "string") return "";
   const trimmed = pathOrUrl.trim();
@@ -227,7 +234,6 @@ function toNhlAbsoluteUrl(pathOrUrl) {
   return `${NHL_WEB}/${trimmed}`;
 }
 
-/** Prefer 3-minute recap URL; fall back to condensed; expose game center separately. */
 function pickMediaLinks(game) {
   const recap =
     toNhlAbsoluteUrl(game?.threeMinRecap) ||
@@ -237,19 +243,6 @@ function pickMediaLinks(game) {
   const gameCenter = toNhlAbsoluteUrl(game?.gameCenterLink) || "";
   const highlights = recap || condensed;
   return { recap, condensed, gameCenter, highlights };
-}
-
-function formatFinalScoreLine(game) {
-  const away = game?.awayTeam;
-  const home = game?.homeTeam;
-  const as = away?.score;
-  const hs = home?.score;
-  const awayAbbr = away?.abbrev ?? "—";
-  const homeAbbr = home?.abbrev ?? "—";
-  if (typeof as === "number" && typeof hs === "number") {
-    return `${awayAbbr} ${as} — ${homeAbbr} ${hs}`;
-  }
-  return "Final (score unavailable)";
 }
 
 function findGameOnScoreboard(boardPayload, gameId) {
@@ -263,10 +256,6 @@ function findGameOnScoreboard(boardPayload, gameId) {
   return null;
 }
 
-/**
- * Club schedule playoff rows omit `topSeedTeamAbbrev` / `bottomSeedTeamAbbrev`; the same game on
- * `/v1/scoreboard/{date}` includes them so we can label the series score.
- */
 async function mergePlayoffSeriesFromScoreboard(game) {
   if (game?.gameType !== 3) return game;
   const existing = game.seriesStatus;
@@ -310,216 +299,104 @@ function teamDisplayLabelFromSide(team) {
   );
 }
 
-function teamLabelForAbbrev(game, abbrev) {
-  const up = abbrev?.toUpperCase();
-  if (!up) return "";
-  for (const side of [game.homeTeam, game.awayTeam]) {
-    if (side?.abbrev?.toUpperCase() === up) {
-      return teamDisplayLabelFromSide(side) || abbrev;
-    }
-  }
-  return abbrev;
+function formatBroadcasts(game) {
+  const list = game?.tvBroadcasts;
+  if (!Array.isArray(list) || !list.length) return "Check local listings";
+  const names = list
+    .map((b) => b?.network || b?.name)
+    .filter(Boolean)
+    .slice(0, 4);
+  return names.length ? names.join(", ") : "Check local listings";
 }
 
-/** e.g. "Dallas Stars vs. Minnesota Wild · 1–1" (top seed listed first). */
-function formatSeriesScoreLine(game) {
-  if (game?.gameType !== 3) return "";
+function formatEtDateTime(iso) {
+  const ms = parseUtc(iso);
+  if (ms == null) return { line: "—", venueLine: "" };
+  const d = new Date(ms);
+  const datePart = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "America/New_York",
+  }).format(d);
+  const timePart = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+    timeZoneName: "shortGeneric",
+  }).format(d);
+  return { line: `${datePart.toUpperCase()} | ${timePart}`.replace(" AM", " AM").replace(" PM", " PM"), venueLine: "" };
+}
+
+function roundGameTitle(game) {
   const s = game?.seriesStatus;
-  if (!s || typeof s !== "object") return "";
-
-  const topAbbr = s.topSeedTeamAbbrev;
-  const bottomAbbr = s.bottomSeedTeamAbbrev;
-  const topW = s.topSeedWins;
-  const bottomW = s.bottomSeedWins;
-
-  if (!topAbbr || !bottomAbbr) return "";
-  if (typeof topW !== "number" || typeof bottomW !== "number") return "";
-
-  const topName = teamLabelForAbbrev(game, topAbbr);
-  const bottomName = teamLabelForAbbrev(game, bottomAbbr);
-  if (!topName || !bottomName) return "";
-
-  return `${topName} vs. ${bottomName} · ${topW}–${bottomW}`;
-}
-
-/**
- * NHL api-web schedule `gameType`: 1 = preseason, 2 = regular season, 3 = playoffs.
- * Playoff `seriesStatus` uses `seriesTitle`, `gameNumberOfSeries`, `neededToWin` (first to N wins).
- */
-function formatSeriesLine(game) {
-  const gt = game?.gameType;
-  const series = game?.seriesStatus;
-
-  if (gt === 3) {
-    if (series && typeof series === "object") {
-      const title =
-        series.seriesTitle ||
-        series.roundName?.default ||
-        series.roundName ||
-        series.seriesAbbrev ||
-        "Playoffs";
-      const gameNum = series.gameNumberOfSeries ?? series.seriesGameNumber;
-      const needed = series.neededToWin;
-      const maxGames =
-        typeof needed === "number" && Number.isFinite(needed) && needed > 0
-          ? needed * 2 - 1
-          : series.maxGames;
-
-      if (gameNum != null && maxGames != null) {
-        return `Playoffs · ${title} · Game ${gameNum} of ${maxGames}`;
-      }
-      if (gameNum != null) {
-        return `Playoffs · ${title} · Game ${gameNum}`;
-      }
-      return `Playoffs · ${title}`;
-    }
-    return "Playoffs";
+  const r = s?.round;
+  const gn = s?.gameNumberOfSeries ?? s?.seriesGameNumber;
+  const title = (s?.seriesTitle || "Playoffs").toString().toUpperCase();
+  if (typeof r === "number" && gn != null) {
+    return `ROUND ${r} — GAME ${gn}`;
   }
-
-  if (gt === 1) {
-    return "Preseason";
+  if (gn != null) {
+    return `${title} — GAME ${gn}`;
   }
+  return title;
+}
 
-  return "";
+function seriesLeadBlurb(game, selfAbbr) {
+  const s = game?.seriesStatus;
+  if (!s || game?.gameType !== 3) return "";
+  const top = s.topSeedTeamAbbrev;
+  const bot = s.bottomSeedTeamAbbrev;
+  const tw = s.topSeedWins;
+  const bw = s.bottomSeedWins;
+  if (typeof tw !== "number" || typeof bw !== "number" || !top || !bot) return "";
+  const u = selfAbbr.toUpperCase();
+  const selfTop = top.toUpperCase() === u;
+  const selfW = selfTop ? tw : bw;
+  const oppW = selfTop ? bw : tw;
+  if (selfW === oppW) return `Series tied ${selfW}–${oppW}`;
+  if (selfW > oppW) return `${selfW}–${oppW} series lead`;
+  return `${oppW}–${selfW} in series`;
 }
 
 /**
- * @param {any} game
- * @param {string} teamAbbrev
+ * One skew cell per possible series game. Every **completed** game (both teams’ wins)
+ * is highlighted in yellow; only not-yet-played slots stay neutral — no “gray for played”.
  */
-function renderGame(game, teamAbbrev) {
-  const abbr = teamAbbrev.toUpperCase();
-  const isHome = game.homeTeam?.abbrev?.toUpperCase() === abbr;
-  const self = isHome ? game.homeTeam : game.awayTeam;
-  const opp = isHome ? game.awayTeam : game.homeTeam;
+function buildSeriesSkew(game) {
+  const s = game?.seriesStatus;
+  if (!s || game?.gameType !== 3) return "";
+  const needed = s.neededToWin;
+  const maxGames =
+    typeof needed === "number" && Number.isFinite(needed) && needed > 0 ? needed * 2 - 1 : 7;
+  const topW = typeof s.topSeedWins === "number" ? s.topSeedWins : 0;
+  const botW = typeof s.bottomSeedWins === "number" ? s.bottomSeedWins : 0;
+  const played = topW + botW;
 
-  const oppName =
-    opp?.teamName?.default ||
-    [opp?.placeName?.default, opp?.commonName?.default].filter(Boolean).join(" ") ||
-    opp?.abbrev ||
-    "Opponent";
-
-  const start = parseUtc(game.startTimeUTC);
-  const when = start != null ? new Date(start) : null;
-
-  const dateStr =
-    when?.toLocaleDateString(undefined, {
-      weekday: "short",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    }) ?? "—";
-
-  const timeStr =
-    when?.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    }) ?? "—";
-
-  const seriesLine = formatSeriesLine(game);
-  const seriesScoreLine = formatSeriesScoreLine(game);
-
-  const logo = typeof self?.logo === "string" ? self.logo : "";
-  const oppLogo = typeof opp?.logo === "string" ? opp.logo : "";
-
-  return `
-    <div class="results-header">
-      ${logo ? `<img class="team-logo" src="${escapeHtml(logo)}" alt="" />` : `<div class="team-logo" aria-hidden="true"></div>`}
-      <div>
-        <h2 class="results-title">${escapeHtml(self?.commonName?.default || self?.abbrev || abbr)}</h2>
-        <p class="results-meta">Next matchup</p>
-      </div>
-    </div>
-    <span class="pill ${isHome ? "" : "pill--away"}">${isHome ? "Home" : "Away"}</span>
-    <dl class="kv" style="margin-top:12px">
-      <dt>Opponent</dt><dd class="opp-cell">${oppLogo ? `<img class="opp-logo" src="${escapeHtml(oppLogo)}" alt="" />` : ""}<span>${escapeHtml(oppName)}</span></dd>
-      <dt>Date</dt><dd>${escapeHtml(dateStr)}</dd>
-      <dt>Local time</dt><dd>${escapeHtml(timeStr)}</dd>
-      ${seriesLine ? `<dt>Series</dt><dd>${escapeHtml(seriesLine)}</dd>` : ""}
-      ${seriesScoreLine ? `<dt>Series score</dt><dd>${escapeHtml(seriesScoreLine)}</dd>` : ""}
-    </dl>
-  `;
+  const cells = [];
+  for (let i = 0; i < maxGames; i += 1) {
+    const cls =
+      i < played ? "series-skew__cell series-skew__cell--played" : "series-skew__cell series-skew__cell--future";
+    cells.push(`<div class="${cls}" role="presentation"></div>`);
+  }
+  return `<div class="series-skew">${cells.join("")}</div>`;
 }
 
-/**
- * @param {any} game
- * @param {string} teamAbbrev
- */
-function renderCompletedGame(game, teamAbbrev) {
-  const abbr = teamAbbrev.toUpperCase();
-  const isHome = game.homeTeam?.abbrev?.toUpperCase() === abbr;
-  const self = isHome ? game.homeTeam : game.awayTeam;
-  const opp = isHome ? game.awayTeam : game.homeTeam;
-
-  const oppName =
-    opp?.teamName?.default ||
-    [opp?.placeName?.default, opp?.commonName?.default].filter(Boolean).join(" ") ||
-    opp?.abbrev ||
-    "Opponent";
-
-  const start = parseUtc(game.startTimeUTC);
-  const when = start != null ? new Date(start) : null;
-
-  const dateStr =
-    when?.toLocaleDateString(undefined, {
-      weekday: "short",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    }) ?? "—";
-
-  const timeStr =
-    when?.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    }) ?? "—";
-
-  const seriesLine = formatSeriesLine(game);
-  const seriesScoreLine = formatSeriesScoreLine(game);
-  const scoreLine = formatFinalScoreLine(game);
-  const media = pickMediaLinks(game);
-
-  const logo = typeof self?.logo === "string" ? self.logo : "";
-  const oppLogo = typeof opp?.logo === "string" ? opp.logo : "";
-
-  const highlightLabel = media.recap
-    ? "Watch highlights (3 min)"
-    : media.condensed
-      ? "Watch condensed game"
-      : "Watch video";
-
-  const highlightLink = media.highlights
-    ? `<a class="external-link" href="${escapeHtml(media.highlights)}" target="_blank" rel="noopener noreferrer">${highlightLabel}</a>`
-    : "";
-
-  const gameCenterLink = media.gameCenter
-    ? `<a class="external-link external-link--muted" href="${escapeHtml(media.gameCenter)}" target="_blank" rel="noopener noreferrer">Open NHL GameCenter</a>`
-    : "";
-
-  const linksBlock =
-    highlightLink || gameCenterLink
-      ? `<div class="links-row">${highlightLink}${gameCenterLink}</div>`
-      : `<p class="muted-note">No highlight or recap link is available for this game yet.</p>`;
-
-  return `
-    <div class="results-header">
-      ${logo ? `<img class="team-logo" src="${escapeHtml(logo)}" alt="" />` : `<div class="team-logo" aria-hidden="true"></div>`}
-      <div>
-        <h2 class="results-title">${escapeHtml(self?.commonName?.default || self?.abbrev || abbr)}</h2>
-        <p class="results-meta">Last game</p>
-      </div>
-    </div>
-    <span class="pill pill--final">Final</span>
-    <dl class="kv" style="margin-top:12px">
-      <dt>Opponent</dt><dd class="opp-cell">${oppLogo ? `<img class="opp-logo" src="${escapeHtml(oppLogo)}" alt="" />` : ""}<span>${escapeHtml(oppName)}</span></dd>
-      <dt>Date</dt><dd>${escapeHtml(dateStr)}</dd>
-      <dt>Local time</dt><dd>${escapeHtml(timeStr)}</dd>
-      <dt>Result</dt><dd>${escapeHtml(scoreLine)}</dd>
-      ${seriesLine ? `<dt>Series</dt><dd>${escapeHtml(seriesLine)}</dd>` : ""}
-      ${seriesScoreLine ? `<dt>Series score</dt><dd>${escapeHtml(seriesScoreLine)}</dd>` : ""}
-      <dt>Media</dt><dd>${linksBlock}</dd>
-    </dl>
-  `;
+function seriesLineSentence(game) {
+  const s = game?.seriesStatus;
+  if (!s || game?.gameType !== 3) return "";
+  const top = s.topSeedTeamAbbrev;
+  const bot = s.bottomSeedTeamAbbrev;
+  const tw = s.topSeedWins;
+  const bw = s.bottomSeedWins;
+  const needed = s.neededToWin;
+  const maxG = typeof needed === "number" ? needed * 2 - 1 : 7;
+  if (!top || !bot || typeof tw !== "number" || typeof bw !== "number") return "";
+  if (tw === bw) return `Series tied ${tw}–${bw} (best-of-${maxG})`;
+  const leader = tw > bw ? top : bot;
+  const lW = Math.max(tw, bw);
+  const tW = Math.min(tw, bw);
+  return `${leader} leads ${lW}–${tW} (best-of-${maxG})`;
 }
 
 function escapeHtml(str) {
@@ -537,15 +414,50 @@ function $(id) {
   return el;
 }
 
+function getActiveTab() {
+  const t = document.querySelector(".segmented__tab.is-active");
+  return t?.dataset.panelTab || "next";
+}
+
+function setActiveTab(tab) {
+  for (const btn of document.querySelectorAll(".segmented__tab")) {
+    const on = btn.dataset.panelTab === tab;
+    btn.classList.toggle("is-active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  }
+}
+
+function updateTeamPreview() {
+  const abbr = $("team-select").value;
+  const wrap = $("team-preview");
+  if (!abbr) {
+    wrap.classList.add("hidden");
+    wrap.innerHTML = "";
+    return;
+  }
+  const t = teamsCatalog.find((x) => x.abbrev === abbr);
+  if (t?.logo) {
+    wrap.innerHTML = `<img src="${escapeHtml(t.logo)}" alt="" />`;
+    wrap.classList.remove("hidden");
+  } else {
+    wrap.classList.add("hidden");
+    wrap.innerHTML = "";
+  }
+}
+
 function setLoading(isLoading) {
   $("loading").classList.toggle("hidden", !isLoading);
   $("team-select").disabled = isLoading;
-  $("view-mode").disabled = isLoading;
+  for (const b of document.querySelectorAll(".segmented__tab")) {
+    b.disabled = isLoading;
+  }
 }
 
 function setScheduleFetching(isFetching) {
   $("team-select").disabled = isFetching;
-  $("view-mode").disabled = isFetching;
+  for (const b of document.querySelectorAll(".segmented__tab")) {
+    b.disabled = isFetching;
+  }
 }
 
 function setError(message) {
@@ -559,108 +471,338 @@ function setError(message) {
   box.classList.remove("hidden");
 }
 
-function setResultsHtml(html) {
-  const el = $("results");
+function showPanel(html) {
+  const el = $("panel");
   el.innerHTML = html;
   el.classList.remove("hidden");
 }
 
-function hideResults() {
-  const el = $("results");
-  el.classList.add("hidden");
-  el.innerHTML = "";
+function hidePanel() {
+  $("panel").classList.add("hidden");
+  $("panel").innerHTML = "";
 }
 
-async function init() {
-  const select = $("team-select");
-  setLoading(true);
-  setError("");
-  hideResults();
-
-  try {
-    const { asOfDate, teams } = await fetchPlayoffTeams();
-    select.innerHTML =
-      `<option value="">Select a team…</option>` +
-      teams.map((t) => `<option value="${escapeHtml(t.abbrev)}">${escapeHtml(t.name)}</option>`).join("");
-
-    const subtitle = document.querySelector(".subtitle");
-    if (subtitle) {
-      subtitle.textContent =
-        teams.length && asOfDate !== getTodayDate()
-          ? `Standings as of ${asOfDate} (latest available)`
-          : "Playoff picture and next game";
-    }
-  } catch (err) {
-    console.error(err);
-    setError(err?.message || "Failed to load playoff teams.");
-    select.innerHTML = `<option value="">Unavailable</option>`;
-  } finally {
-    setLoading(false);
-    select.disabled = false;
+function updateFooterTimestamp() {
+  const el = $("updated-at");
+  if (!lastRefreshMs) {
+    el.textContent = "";
+    return;
   }
+  const sec = Math.max(0, Math.floor((Date.now() - lastRefreshMs) / 1000));
+  const label = sec < 60 ? `Updated ${sec}s ago` : `Updated ${Math.floor(sec / 60)}m ago`;
+  el.textContent = label;
 }
 
-function getViewMode() {
-  const el = document.getElementById("view-mode");
-  return el?.value === "last" ? "last" : "next";
+function renderNextGameCard(game, teamAbbrev) {
+  const abbr = teamAbbrev.toUpperCase();
+  const isHome = game.homeTeam?.abbrev?.toUpperCase() === abbr;
+  const self = isHome ? game.homeTeam : game.awayTeam;
+  const opp = isHome ? game.awayTeam : game.homeTeam;
+
+  const selfName = (self?.commonName?.default || self?.abbrev || abbr).toUpperCase();
+  const oppName = (opp?.commonName?.default || opp?.abbrev || "OPP").toUpperCase();
+
+  const selfLogo = self?.logo ? `<img class="matchup__logo" src="${escapeHtml(self.logo)}" alt="" />` : "";
+  const oppLogo = opp?.logo ? `<img class="matchup__logo" src="${escapeHtml(opp.logo)}" alt="" />` : "";
+
+  const { line: whenLine } = formatEtDateTime(game.startTimeUTC);
+  const venue = game?.venue?.default || game?.venue;
+  const venueText = venue ? `Venue: ${venue}` : "";
+
+  const roundTitle = game.gameType === 3 ? roundGameTitle(game) : "NEXT GAME";
+  const kicker = game.gameType === 3 ? "Next game details" : "Regular season / preseason";
+
+  const subSelf = game.gameType === 3 ? seriesLeadBlurb(game, abbr) : isHome ? "Home" : "Away";
+  const oppAbbr = (opp?.abbrev || "OPP").toUpperCase();
+  const subOpp = game.gameType === 3 ? seriesLeadBlurb(game, oppAbbr) : isHome ? "Away" : "Home";
+
+  const skew = game.gameType === 3 ? buildSeriesSkew(game) : "";
+  const lineLbl = game.gameType === 3 ? escapeHtml(seriesLineSentence(game)) : "";
+  const seriesBlock =
+    game.gameType === 3 && skew
+      ? `<div class="series-line-label">${lineLbl}</div>${skew}`
+      : "";
+
+  const nets = escapeHtml(formatBroadcasts(game));
+
+  return `
+    <div class="card-head">
+      <p class="card-head__kicker">${escapeHtml(kicker)}</p>
+      <h2 class="card-head__title">${escapeHtml(roundTitle)}</h2>
+    </div>
+    <div class="matchup">
+      <div class="matchup__team matchup__team--left">
+        ${selfLogo}
+        <span class="matchup__abbr">${escapeHtml(selfName)}</span>
+        <span class="matchup__sub">${escapeHtml(subSelf)}</span>
+      </div>
+      <div class="matchup__center">
+        <div class="matchup__when">${escapeHtml(whenLine)}</div>
+        <div class="matchup__venue">${escapeHtml(venueText)}</div>
+      </div>
+      <div class="matchup__team matchup__team--right">
+        ${oppLogo}
+        <span class="matchup__abbr">${escapeHtml(oppName)}</span>
+        <span class="matchup__sub">${escapeHtml(subOpp)}</span>
+      </div>
+    </div>
+    ${seriesBlock}
+    <div class="broadcast">
+      <p class="broadcast__label">Tonight</p>
+      <p class="broadcast__nets">${nets}</p>
+    </div>
+  `;
 }
 
-async function refreshTeamPanel() {
-  const teamAbbrev = $("team-select").value;
+function renderSeriesTab(game, teamAbbrev, lastGame) {
+  if (!game || game.gameType !== 3) {
+    const last = lastGame && lastGame.gameType === 3 ? lastGame : null;
+    const links = last ? mediaLinksHtml(last) : "";
+    return `
+      <div class="card-head series-body">
+        <p class="card-head__kicker">Series overview</p>
+        <h2 class="card-head__title">No upcoming playoff game</h2>
+        <p class="empty-state" style="margin-top:10px">When the club lines up a postseason game, series status and a win tracker will show here.</p>
+        ${links ? `<div style="margin-top:14px"><p class="card-head__kicker">Latest playoff result</p>${links}</div>` : ""}
+      </div>
+    `;
+  }
+
+  const abbr = teamAbbrev.toUpperCase();
+  const line = seriesLineSentence(game);
+  const skew = buildSeriesSkew(game);
+  const last = lastGame && lastGame.gameType === 3 ? lastGame : null;
+
+  return `
+    <div class="card-head">
+      <p class="card-head__kicker">Series overview</p>
+      <h2 class="card-head__title">${escapeHtml(roundGameTitle(game))}</h2>
+    </div>
+    <p class="series-line-label">${escapeHtml(line)}</p>
+    ${skew}
+    ${last ? `<div style="margin-top:14px"><p class="card-head__kicker">Last playoff game</p>${mediaLinksHtml(last)}</div>` : ""}
+  `;
+}
+
+function mediaLinksHtml(game) {
+  const m = pickMediaLinks(game);
+  const parts = [];
+  if (m.highlights) {
+    parts.push(
+      `<a class="link-pill" href="${escapeHtml(m.highlights)}" target="_blank" rel="noopener noreferrer">Highlights</a>`,
+    );
+  }
+  if (m.gameCenter) {
+    parts.push(
+      `<a class="link-pill" href="${escapeHtml(m.gameCenter)}" target="_blank" rel="noopener noreferrer">GameCenter</a>`,
+    );
+  }
+  return parts.length ? `<div class="links-inline">${parts.join("")}</div>` : "";
+}
+
+function renderStandingsTab() {
+  const rows = cachedStandings.rows;
+  if (!rows.length) {
+    return `<p class="empty-state">Standings are not available.</p>`;
+  }
+  const byConf = new Map();
+  for (const row of rows) {
+    const c = row.conferenceAbbrev || "?";
+    if (!byConf.has(c)) byConf.set(c, []);
+    byConf.get(c).push(row);
+  }
+
+  const parts = [];
+  parts.push(
+    `<p class="card-head__kicker">Playoff picture</p><h2 class="card-head__title">Standings snapshot</h2>`,
+  );
+  parts.push(`<p class="st-note">As of <strong>${escapeHtml(cachedStandings.date)}</strong> · top 8 per conference by API order</p>`);
+
+  for (const [conf, group] of [...byConf.entries()].sort()) {
+    const sorted = group.slice().sort((a, b) => (a.conferenceSequence ?? 999) - (b.conferenceSequence ?? 999));
+    const top8 = sorted.slice(0, 8);
+    const label = conf === "E" ? "Eastern" : conf === "W" ? "Western" : `Conference ${conf}`;
+    parts.push(`<div class="st-conf">${escapeHtml(label)}</div>`);
+    parts.push('<div class="st-table-wrap"><table class="st-table"><thead><tr><th>#</th><th>Team</th><th>PTS</th></tr></thead><tbody>');
+    top8.forEach((row, idx) => {
+      const abbr = escapeHtml(teamAbbrevFromRow(row));
+      const pts = row.points ?? "—";
+      parts.push(`<tr><td>${idx + 1}</td><td>${abbr}</td><td>${escapeHtml(String(pts))}</td></tr>`);
+    });
+    parts.push("</tbody></table></div>");
+  }
+
+  return parts.join("");
+}
+
+async function ensureSchedule(teamAbbrev) {
+  if (!teamAbbrev) return null;
+  if (scheduleCache && scheduleCache.abbrev === teamAbbrev) {
+    return scheduleCache.games;
+  }
+  const { games } = await fetchTeamSchedule(teamAbbrev);
+  scheduleCache = { abbrev: teamAbbrev, games };
+  lastRefreshMs = Date.now();
+  return games;
+}
+
+async function renderPanel() {
+  const tab = getActiveTab();
+  const team = $("team-select").value;
   setError("");
 
-  if (!teamAbbrev) {
-    hideResults();
+  if (!team) {
+    hidePanel();
     return;
   }
 
-  setResultsHtml(
-    `<div class="loading schedule-loading"><span class="spinner" aria-hidden="true"></span><span class="loading-text">Loading schedule…</span></div>`,
-  );
+  if (tab === "standings") {
+    showPanel(renderStandingsTab());
+    updateFooterTimestamp();
+    return;
+  }
+
+  $("panel").classList.remove("hidden");
+  $("panel").innerHTML = `<div class="loading schedule-loading"><span class="spinner" aria-hidden="true"></span><span class="loading-text">Loading schedule…</span></div>`;
+
   setScheduleFetching(true);
   try {
-    const { games } = await fetchTeamSchedule(teamAbbrev);
-    const mode = getViewMode();
+    const games = await ensureSchedule(team);
+    if (!games) return;
 
-    if (mode === "last") {
-      const last = findLastCompletedGame(games, teamAbbrev);
-      if (!last) {
-        setResultsHtml(
-          `<p class="empty-state">No completed games found for ${escapeHtml(teamAbbrev)} in the current season window.</p>`,
-        );
+    if (tab === "next") {
+      const next = findNextGame(games, team);
+      if (!next) {
+        showPanel(`<p class="empty-state">No upcoming games for ${escapeHtml(team)} in the current season window.</p>`);
         return;
       }
-      const enriched = await mergePlayoffSeriesFromScoreboard(last);
-      setResultsHtml(renderCompletedGame(enriched, teamAbbrev));
-      return;
+      const enriched = await mergePlayoffSeriesFromScoreboard(next);
+      showPanel(renderNextGameCard(enriched, team));
+    } else {
+      const nextP = findNextPlayoffGame(games, team);
+      const lastP = findLatestCompletedPlayoffGame(games, team);
+      const lastAny = findLastCompletedGame(games, team);
+      const focus = nextP || lastP;
+      const enriched = focus ? await mergePlayoffSeriesFromScoreboard(focus) : null;
+      const enrichedLast = lastAny && lastAny.gameType === 3 ? await mergePlayoffSeriesFromScoreboard(lastAny) : lastAny;
+      showPanel(renderSeriesTab(enriched, team, enrichedLast));
     }
-
-    const next = findNextGame(games, teamAbbrev);
-    if (!next) {
-      setResultsHtml(
-        `<p class="empty-state">No upcoming games found for ${escapeHtml(teamAbbrev)} in the current season window.</p>`,
-      );
-      return;
-    }
-    const enriched = await mergePlayoffSeriesFromScoreboard(next);
-    setResultsHtml(renderGame(enriched, teamAbbrev));
   } catch (err) {
     console.error(err);
-    hideResults();
+    hidePanel();
     setError(err?.message || "Failed to load schedule.");
   } finally {
     setScheduleFetching(false);
+    updateFooterTimestamp();
+  }
+}
+
+async function refreshStandingsAndPanel() {
+  try {
+    setScheduleFetching(true);
+    const { date, rows } = await fetchStandingsWithFallback();
+    cachedStandings = { date, rows };
+    const playoffRows = pickPlayoffTeams(rows);
+    if (!playoffRows.length) throw new Error("Could not determine playoff teams.");
+    teamsCatalog = sortTeamsForUi(playoffRows).map((row) => ({
+      abbrev: teamAbbrevFromRow(row),
+      name: teamDisplayName(row),
+      logo: typeof row.teamLogo === "string" ? row.teamLogo : undefined,
+    }));
+    const sel = $("team-select");
+    const prev = sel.value;
+    sel.innerHTML =
+      `<option value="">Select a team…</option>` +
+      teamsCatalog.map((t) => `<option value="${escapeHtml(t.abbrev)}">${escapeHtml(t.name)}</option>`).join("");
+    if (prev && teamsCatalog.some((t) => t.abbrev === prev)) {
+      sel.value = prev;
+    } else if (teamsCatalog.length) {
+      sel.value = teamsCatalog[0].abbrev;
+    }
+    updateTeamPreview();
+    scheduleCache = null;
+    lastRefreshMs = Date.now();
+    await renderPanel();
+  } catch (err) {
+    console.error(err);
+    setError(err?.message || "Refresh failed.");
+  } finally {
+    setScheduleFetching(false);
+    updateFooterTimestamp();
+  }
+}
+
+async function init() {
+  setLoading(true);
+  setError("");
+  hidePanel();
+
+  try {
+    const { date, rows } = await fetchStandingsWithFallback();
+    cachedStandings = { date, rows };
+    const playoffRows = pickPlayoffTeams(rows);
+    if (!playoffRows.length) {
+      throw new Error("Could not determine playoff teams from standings.");
+    }
+    teamsCatalog = sortTeamsForUi(playoffRows).map((row) => ({
+      abbrev: teamAbbrevFromRow(row),
+      name: teamDisplayName(row),
+      logo: typeof row.teamLogo === "string" ? row.teamLogo : undefined,
+    }));
+
+    const sel = $("team-select");
+    sel.innerHTML =
+      `<option value="">Select a team…</option>` +
+      teamsCatalog.map((t) => `<option value="${escapeHtml(t.abbrev)}">${escapeHtml(t.name)}</option>`).join("");
+
+    if (teamsCatalog.length) {
+      sel.selectedIndex = 1;
+      updateTeamPreview();
+    }
+    lastRefreshMs = Date.now();
+    await renderPanel();
+  } catch (err) {
+    console.error(err);
+    setError(err?.message || "Failed to load playoff teams.");
+    $("team-select").innerHTML = `<option value="">Unavailable</option>`;
+  } finally {
+    setLoading(false);
+    updateFooterTimestamp();
   }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  init();
+  void init();
 
   $("team-select").addEventListener("change", () => {
-    void refreshTeamPanel();
+    updateTeamPreview();
+    scheduleCache = null;
+    void renderPanel();
   });
 
-  $("view-mode").addEventListener("change", () => {
-    void refreshTeamPanel();
+  for (const btn of document.querySelectorAll(".segmented__tab")) {
+    btn.addEventListener("click", () => {
+      setActiveTab(btn.dataset.panelTab || "next");
+      void renderPanel();
+    });
+  }
+
+  $("btn-refresh").addEventListener("click", () => {
+    void refreshStandingsAndPanel();
   });
+
+  $("btn-settings").addEventListener("click", () => {
+    const v = chrome.runtime.getManifest().version;
+    window.alert(
+      `NHL Playoff Tracker\nVersion ${v}\n\nNo syncable settings yet. Data loads fresh from the NHL API when you open or refresh the popup.`,
+    );
+  });
+
+  $("btn-help").addEventListener("click", () => {
+    window.alert(
+      "Pick a playoff-position team, then use the tabs:\n\n• Next game — upcoming opponent, time (ET), venue, TV, and playoff series tracker when applicable.\n\n• Series overview — playoff series context; links to the last playoff recap when available.\n\n• Standings — top eight per conference from the latest standings snapshot.\n\nUse Refresh to pull the latest API data.",
+    );
+  });
+
+  setInterval(updateFooterTimestamp, 15000);
 });
